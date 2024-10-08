@@ -3,9 +3,5 @@ project(reactor)
 
 set(CMAKE_CXX_STANDARD 23)
 
-add_executable(reactor
-        main.cpp
-        reactor.cpp
-        reactor.h
-        task.cpp
-        task.h)
+add_subdirectory(core)
+add_subdirectory(example)

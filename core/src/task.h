@@ -1,6 +1,8 @@
 #ifndef REACTOR_TASK_H
 #define REACTOR_TASK_H
 
+#include <coroutine>
+
 class Task {
 public:
     struct promise_type {
@@ -17,7 +19,7 @@ public:
         template<typename T>
         T &&await_transform(T &&awaitable) noexcept {
             should_resume = false;
-            return static_cast<T &&>(awaitable);
+            return awaitable;
         }
 
         constexpr void unhandled_exception() const noexcept {};
