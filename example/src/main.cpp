@@ -4,7 +4,7 @@
 
 #include <reactor.h>
 
-Task example_sleep(std::shared_ptr<Reactor> reactor) {
+Task example_sleep(const std::shared_ptr<Reactor>& reactor) {
     std::cout << "Sleeping for 3 seconds!" << std::endl;
     co_await reactor->sleep_for(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::seconds(3L)));
     std::cout << "Done!\n";
