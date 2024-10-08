@@ -6,6 +6,11 @@ Task::Task(std::coroutine_handle<promise_type> handle) : m_handle(handle) {
 
 }
 
+Task::Task(Task &&other) noexcept {
+    m_handle = other.m_handle;
+    other.m_handle = nullptr;
+}
+
 Task::~Task() {
     if (m_handle) {
         m_handle.destroy();

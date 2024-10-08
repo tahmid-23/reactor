@@ -1,13 +1,19 @@
 #include <algorithm>
+#include <memory>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <unistd.h>
 
+#include "async_fd.h"
 #include "reactor.h"
 
-constexpr int EVENT_RECEIVED = 1;
-
-Reactor::Reactor(int epollfd, int reactor_eventfd) : m_epollfd(epollfd), m_eventfd(reactor_eventfd) {
+Reactor::Reactor(
+        int epollfd,
+        int reactor_eventfd,
+        std::unique_ptr<EpollInfo>&& eventfd_info
+) : m_epollfd(epollfd),
+    m_eventfd(reactor_eventfd),
+    m_eventfd_info(std::move(eventfd_info)) {
 
 }
 
@@ -25,18 +31,38 @@ timespec chrono_to_ts(const std::chrono::nanoseconds &duration) {
 
 [[noreturn]] void Reactor::run() {
     std::optional<timespec> timeout_opt = std::nullopt;
-    epoll_event events[8];
+    epoll_event epoll_events[8];
     while (true) {
         timespec *timeout_ptr = nullptr;
         if (timeout_opt) {
             timeout_ptr = &timeout_opt.value();
         }
 
-        int triggered_events = epoll_pwait2(m_epollfd, events, sizeof(events) / sizeof(*events), timeout_ptr, nullptr);
+        int triggered_events = epoll_pwait2(m_epollfd, epoll_events, sizeof(epoll_events) / sizeof(*epoll_events), timeout_ptr, nullptr);
         for (int i = 0; i < triggered_events; ++i) {
-            switch (events[i].data.u32) {
-                case EVENT_RECEIVED:
+            auto events = epoll_events[i].events;
+            auto *info = static_cast<EpollInfo *>(epoll_events[i].data.ptr);
+            switch (info->type) {
+                case EpollEventType::EVENTFD:
                     eventfd_read(m_eventfd, nullptr);
+                    break;
+                case EpollEventType::ASYNCFD:
+                    AsyncFd *fd = info->data.async_fd;
+
+                    if (events & EPOLLIN) {
+                        fd->set_read_ready();
+                        auto& read_coro = fd->m_read_coro;
+                        if (read_coro) {
+                            read_coro.value().promise().should_resume = true;
+                        }
+                    }
+                    if (events & EPOLLOUT) {
+                        fd->set_write_ready();
+                        auto& write_coro = fd->m_write_coro;
+                        if (write_coro) {
+                            write_coro.value().promise().should_resume = true;
+                        }
+                    }
                     break;
             }
         }
@@ -72,10 +98,37 @@ SleepAwaitable Reactor::sleep_for(std::chrono::nanoseconds duration) {
     return SleepAwaitable{m_mutex, m_sleep_queue, m_eventfd, until};
 }
 
+void Reactor::register_fd(AsyncFd *fd) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto [it, _] = m_async_fds.insert({fd->get(), {fd, {} }});
+    auto& epoll_info = it->second.second;
+    epoll_info.type = EpollEventType::ASYNCFD;
+    epoll_info.data.async_fd = fd;
+
+    epoll_event eventfd_event{};
+    eventfd_event.events = EPOLLIN | EPOLLOUT | EPOLLET;
+    eventfd_event.data.ptr = &epoll_info;
+    if (epoll_ctl(m_epollfd, EPOLL_CTL_ADD, fd->get(), &eventfd_event) == -1) {
+        m_async_fds.erase(it);
+    }
+}
+
+void Reactor::deregister_fd(AsyncFd *fd) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = m_async_fds.find(fd->get());
+    if (it == m_async_fds.end()) {
+        return;
+    }
+
+    epoll_ctl(m_epollfd, EPOLL_CTL_DEL, fd->get(), nullptr);
+    m_async_fds.erase(it);
+}
+
 void SleepAwaitable::await_suspend(std::coroutine_handle<Task::promise_type> handle) const {
-    m_mutex.lock();
-    m_sleep_queue.emplace(m_until, handle);
-    m_mutex.unlock();
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_sleep_queue.emplace(m_until, handle);
+    }
     eventfd_write(m_eventfd, 1);
 }
 
@@ -91,14 +144,16 @@ std::optional<std::shared_ptr<Reactor>> create_reactor() {
         return {};
     }
 
+    std::unique_ptr<EpollInfo> eventfd_info = std::make_unique<EpollInfo>(EpollInfo{EpollEventType::EVENTFD, {}});
+
     epoll_event eventfd_event{};
     eventfd_event.events = EPOLLIN;
-    eventfd_event.data.u32 = EVENT_RECEIVED;
+    eventfd_event.data.ptr = eventfd_info.get();
     if (epoll_ctl(epollfd, EPOLL_CTL_ADD, reactor_eventfd, &eventfd_event) == -1) {
         close(reactor_eventfd);
         close(epollfd);
         return {};
     }
 
-    return std::make_shared<Reactor>(epollfd, reactor_eventfd);
+    return std::make_shared<Reactor>(epollfd, reactor_eventfd, std::move(eventfd_info));
 }

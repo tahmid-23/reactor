@@ -6,14 +6,29 @@
 #include <mutex>
 #include <optional>
 #include <queue>
+#include <unordered_map>
 
 #include "task.h"
 
+class AsyncFd;
+
 class SleepAwaitable;
+
+enum EpollEventType {
+    EVENTFD,
+    ASYNCFD
+};
+
+struct EpollInfo {
+    EpollEventType type;
+    union {
+        AsyncFd *async_fd;
+    } data;
+};
 
 class Reactor {
 
-    std::mutex m_mutex = {};
+    std::mutex m_mutex{};
 
     std::priority_queue<std::pair<std::chrono::time_point<std::chrono::steady_clock, std::chrono::nanoseconds>, std::coroutine_handle<Task::promise_type>>, std::vector<std::pair<std::chrono::time_point<std::chrono::steady_clock, std::chrono::nanoseconds>, std::coroutine_handle<Task::promise_type>>>, std::greater<>> m_sleep_queue;
 
@@ -21,15 +36,23 @@ class Reactor {
 
     int m_eventfd;
 
+    std::unique_ptr<EpollInfo> m_eventfd_info;
+
+    std::unordered_map<int, std::pair<AsyncFd *, EpollInfo>> m_async_fds{};
+
 public:
     [[noreturn]] void run();
 
     SleepAwaitable sleep_for(std::chrono::nanoseconds duration);
 
 public:
-    explicit Reactor(int epollfd, int reactor_eventfd);
+    explicit Reactor(int epollfd, int reactor_eventfd, std::unique_ptr<EpollInfo>&& eventfd_info);
 
     ~Reactor();
+
+    void register_fd(AsyncFd *fd);
+
+    void deregister_fd(AsyncFd *fd);
 };
 
 class SleepAwaitable {

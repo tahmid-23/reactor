@@ -33,6 +33,9 @@ private:
     explicit Task(std::coroutine_handle<promise_type> handle);
 
 public:
+    Task(const Task&) = delete;
+
+    Task(Task&& other) noexcept;
 
     ~Task();
 
